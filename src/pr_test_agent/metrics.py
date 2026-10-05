@@ -27,6 +27,7 @@ class RunMetrics:
     estimated_cost_usd: float | None
     duration_s: float
     stop_reason: str
+    final_message: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert metrics to dictionary."""
@@ -147,4 +148,5 @@ def compute_metrics(
         estimated_cost_usd=estimated_cost_usd,
         duration_s=duration_s,
         stop_reason=result.stop_reason,
+        final_message=result.final_message,
     )

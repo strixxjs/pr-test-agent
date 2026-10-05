@@ -100,3 +100,31 @@ def test_render_comment_early_stop() -> None:
     assert lines
     assert lines[0] == "<!-- pr-test-agent -->"
     assert "Stopped early: max_steps" in comment
+
+
+def test_render_comment_error_stop_reason() -> None:
+    metrics = RunMetrics(
+        tests_added=1,
+        first_run_total=1,
+        first_run_passed=1,
+        first_attempt_pass_pct=100.0,
+        final_passed=1,
+        final_failed=0,
+        fix_attempts=0,
+        coverage_before_pct=20.0,
+        coverage_after_pct=25.0,
+        coverage_delta_pct=5.0,
+        prompt_tokens=5000,
+        completion_tokens=2000,
+        estimated_cost_usd=0.005,
+        duration_s=15.2,
+        stop_reason="error",
+        final_message="RuntimeError: Groq rate limit exceeded",
+    )
+
+    comment = render_comment(
+        metrics, written_tests=["tests/test_f.py"], model="test-model"
+    )
+
+    assert "Stopped early: error" in comment
+    assert "Error: RuntimeError: Groq rate limit exceeded" in comment

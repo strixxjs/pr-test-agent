@@ -1,12 +1,16 @@
+import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from pr_test_agent.agent import Limits, run_agent
 from pr_test_agent.llm import LLMReply, ToolCall
+from pr_test_agent.runlog import RunLog
 
 
 class FakeClient:
-    def __init__(self, replies: list[LLMReply]) -> None:
+    def __init__(self, replies: list[LLMReply | Exception]) -> None:
         self.replies = list(replies)
         self.call_count = 0
         self.calls: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
@@ -18,6 +22,8 @@ class FakeClient:
         if self.call_count < len(self.replies):
             reply = self.replies[self.call_count]
             self.call_count += 1
+            if isinstance(reply, Exception):
+                raise reply
             return reply
         return LLMReply(
             content="Done",
@@ -349,3 +355,86 @@ def test_agent_events_emitted(git_repo: Path) -> None:
         assert "step" in ev
         assert "name" in ev
         assert "tokens" in ev
+
+
+def test_agent_error_on_second_llm_call(git_repo: Path, tmp_path: Path) -> None:
+    reply1 = LLMReply(
+        content=None,
+        tool_calls=[
+            ToolCall(
+                id="call_1",
+                name="write_test",
+                arguments={
+                    "path": "tests/test_err.py",
+                    "content": "def test_err() -> None:\n    assert True\n",
+                },
+            )
+        ],
+        prompt_tokens=20,
+        completion_tokens=10,
+    )
+    client = FakeClient([reply1, RuntimeError("Groq server failure")])
+    log_file = tmp_path / "run.jsonl"
+    with RunLog(log_file) as run_log:
+        result = run_agent(git_repo, "main", client, on_event=run_log.as_callback())
+
+    assert result.stop_reason == "error"
+    assert result.final_message != ""
+    assert "RuntimeError: Groq server failure" in result.final_message
+
+    lines = [
+        json.loads(line)
+        for line in log_file.read_text(encoding="utf-8").splitlines()
+    ]
+    error_events = [ev for ev in lines if ev.get("type") == "error"]
+    assert len(error_events) == 1
+    err_ev = error_events[0]
+    assert err_ev["where"] == "llm"
+    assert err_ev["error_type"] == "RuntimeError"
+    assert "Groq server failure" in err_ev["message"]
+
+
+def test_agent_error_on_setup(tmp_path: Path) -> None:
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    events: list[dict[str, Any]] = []
+    client = FakeClient([])
+    result = run_agent(empty_dir, "main", client, on_event=events.append)
+
+    assert result.stop_reason == "error"
+    assert result.final_message != ""
+    error_events = [ev for ev in events if ev.get("type") == "error"]
+    assert len(error_events) == 1
+    assert error_events[0]["where"] == "setup"
+
+
+def test_agent_error_on_tool_execution(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reply = LLMReply(
+        content=None,
+        tool_calls=[
+            ToolCall(
+                id="call_1",
+                name="read_file",
+                arguments={"path": "src/math_ops.py"},
+            )
+        ],
+        prompt_tokens=10,
+        completion_tokens=10,
+    )
+
+    def _crash(*_args: Any, **_kwargs: Any) -> str:
+        raise OSError("Simulated disk read crash")
+
+    monkeypatch.setattr("pr_test_agent.agent.read_file", _crash)
+
+    events: list[dict[str, Any]] = []
+    client = FakeClient([reply])
+    result = run_agent(git_repo, "main", client, on_event=events.append)
+
+    assert result.stop_reason == "error"
+    assert "OSError: Simulated disk read crash" in result.final_message
+    error_events = [ev for ev in events if ev.get("type") == "error"]
+    assert len(error_events) == 1
+    assert error_events[0]["where"] == "tool"

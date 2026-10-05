@@ -159,7 +159,12 @@ def main(
             price_out_per_mtok=price_out,
         )
 
-        comment = render_comment(metrics, result.written_tests, model=model)
+        comment = render_comment(
+            metrics,
+            result.written_tests,
+            model=model,
+            final_message=result.final_message,
+        )
         print(comment)
 
         if args.comment_out:
@@ -177,6 +182,9 @@ def main(
                 "steps": result.steps,
             }
             json_path.write_text(json.dumps(out_data, indent=2), encoding="utf-8")
+
+        if result.stop_reason != "done":
+            print(result.final_message, file=sys.stderr)
 
         return 0 if result.stop_reason == "done" else 1
 

@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -8,14 +9,18 @@ from pr_test_agent.llm import LLMReply, ToolCall
 
 
 class FakeCLIClient:
-    def __init__(self, replies: list[LLMReply]) -> None:
+    def __init__(self, replies: list[LLMReply | Exception]) -> None:
         self.replies = list(replies)
         self.call_count = 0
 
-    def chat(self, messages: list[dict], tools: list[dict]) -> LLMReply:
+    def chat(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> LLMReply:
         if self.call_count < len(self.replies):
             reply = self.replies[self.call_count]
             self.call_count += 1
+            if isinstance(reply, Exception):
+                raise reply
             return reply
         return LLMReply(
             content="Done",
@@ -136,3 +141,40 @@ def test_cli_version(capsys: pytest.CaptureFixture) -> None:
     assert code == 0
     captured = capsys.readouterr()
     assert "pr-test-agent 0.1.0" in captured.out
+
+
+def test_cli_error_prints_final_message_to_stderr(
+    git_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    monkeypatch.chdir(work_dir)
+    monkeypatch.setenv("GROQ_API_KEY", "fake_cli_key")
+    monkeypatch.setenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+    reply1 = LLMReply(
+        content=None,
+        tool_calls=[
+            ToolCall(
+                id="c1",
+                name="write_test",
+                arguments={
+                    "path": "tests/test_cli_err.py",
+                    "content": "def test_cli_err() -> None: assert True\n",
+                },
+            )
+        ],
+        prompt_tokens=20,
+        completion_tokens=10,
+    )
+    client = FakeCLIClient([reply1, RuntimeError("API connection dropped")])
+
+    argv = ["run", "--repo", str(git_repo), "--base", "main"]
+    exit_code = main(argv, client_factory=lambda: client)
+    assert exit_code == 1
+
+    captured = capsys.readouterr()
+    assert "RuntimeError: API connection dropped" in captured.err

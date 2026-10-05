@@ -8,7 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pr_test_agent.guards import GuardError
 from pr_test_agent.llm import LLMClient
+from pr_test_agent.runlog import redact_data
 from pr_test_agent.tools import (
     PytestResult,
     get_coverage,
@@ -138,41 +140,65 @@ def run_agent(
 ) -> AgentResult:
     """Execute the PR test writing agent loop."""
     active_limits = limits if limits is not None else Limits()
-    diff_res = read_diff(repo_root, base_ref)
-    has_changed_funcs = any(len(f.functions) > 0 for f in diff_res.files)
-    if not has_changed_funcs:
+    try:
+        diff_res = read_diff(repo_root, base_ref)
+        has_changed_funcs = any(len(f.functions) > 0 for f in diff_res.files)
+        if not has_changed_funcs:
+            return AgentResult(
+                stop_reason="done",
+                steps=0,
+                total_tokens=0,
+                prompt_tokens=0,
+                completion_tokens=0,
+                pytest_runs=[],
+                written_tests=[],
+                final_message="No changed functions found in diff.",
+            )
+
+        file_summaries: list[str] = []
+        for f in diff_res.files:
+            func_strs = [
+                f"{fn.name} ({'async' if fn.is_async else 'sync'}, lines {fn.start_line}-{fn.end_line})"
+                for fn in f.functions
+            ]
+            file_summaries.append(
+                f"File: {f.path}\nChanged functions: {', '.join(func_strs) if func_strs else 'none'}"
+            )
+
+        first_user_content = (
+            "Please write pytest tests for the following changed code in this PR.\n\n"
+            + "\n".join(file_summaries)
+            + "\n\nGit diff:\n"
+            + diff_res.diff_text
+        )
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": first_user_content},
+        ]
+    except Exception as exc:  # noqa: BLE001
+        err_type = type(exc).__name__
+        msg = str(redact_data(str(exc)[:800]))
+        _emit_event(
+            on_event,
+            {
+                "type": "error",
+                "where": "setup",
+                "step": 0,
+                "error_type": err_type,
+                "message": msg,
+            },
+        )
         return AgentResult(
-            stop_reason="done",
+            stop_reason="error",
             steps=0,
             total_tokens=0,
             prompt_tokens=0,
             completion_tokens=0,
             pytest_runs=[],
             written_tests=[],
-            final_message="No changed functions found in diff.",
+            final_message=f"{err_type}: {msg}",
         )
-
-    file_summaries: list[str] = []
-    for f in diff_res.files:
-        func_strs = [
-            f"{fn.name} ({'async' if fn.is_async else 'sync'}, lines {fn.start_line}-{fn.end_line})"
-            for fn in f.functions
-        ]
-        file_summaries.append(
-            f"File: {f.path}\nChanged functions: {', '.join(func_strs) if func_strs else 'none'}"
-        )
-
-    first_user_content = (
-        "Please write pytest tests for the following changed code in this PR.\n\n"
-        + "\n".join(file_summaries)
-        + "\n\nGit diff:\n"
-        + diff_res.diff_text
-    )
-
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": first_user_content},
-    ]
 
     steps = 0
     total_tokens = 0
@@ -194,14 +220,27 @@ def run_agent(
             stop_reason = "token_budget"
             break
 
+        steps += 1
+
         try:
             reply = client.chat(messages=messages, tools=TOOL_DEFINITIONS)
         except Exception as exc:  # noqa: BLE001
+            err_type = type(exc).__name__
+            msg = str(redact_data(str(exc)[:800]))
             stop_reason = "error"
-            final_message = f"LLM client error: {exc}"
+            final_message = f"{err_type}: {msg}"
+            _emit_event(
+                on_event,
+                {
+                    "type": "error",
+                    "where": "llm",
+                    "step": steps,
+                    "error_type": err_type,
+                    "message": msg,
+                },
+            )
             break
 
-        steps += 1
         prompt_tokens += reply.prompt_tokens
         completion_tokens += reply.completion_tokens
         call_tokens = reply.prompt_tokens + reply.completion_tokens
@@ -252,57 +291,81 @@ def run_agent(
 
         should_stop = False
         for tc in reply.tool_calls:
-            if tc.raw_arguments is not None:
-                tool_output = f"ERROR: Invalid JSON arguments: {tc.raw_arguments}"
-            else:
-                try:
-                    if tc.name == "read_file":
-                        path = tc.arguments.get("path", "")
+            tool_output = ""
+            try:
+                if tc.raw_arguments is not None:
+                    tool_output = f"ERROR: Invalid JSON arguments: {tc.raw_arguments}"
+                elif tc.name == "read_file":
+                    path = tc.arguments.get("path", "")
+                    try:
                         tool_output = read_file(repo_root, path)
+                    except GuardError as ge:
+                        tool_output = f"ERROR: {ge}"
 
-                    elif tc.name == "write_test":
-                        path = tc.arguments.get("path", "")
-                        content = tc.arguments.get("content", "")
-                        if last_pytest_failed:
-                            fix_attempts += 1
-                            if fix_attempts > active_limits.max_fix_attempts:
-                                stop_reason = "fix_attempts_exhausted"
-                                should_stop = True
-                                break
+                elif tc.name == "write_test":
+                    path = tc.arguments.get("path", "")
+                    content = tc.arguments.get("content", "")
+                    if last_pytest_failed:
+                        fix_attempts += 1
+                        if fix_attempts > active_limits.max_fix_attempts:
+                            stop_reason = "fix_attempts_exhausted"
+                            should_stop = True
+                            break
 
+                    try:
                         written_path = write_test(repo_root, path, content)
                         if path not in written_tests:
                             written_tests.append(path)
                         tool_output = f"Wrote test file to {written_path}"
+                    except GuardError as ge:
+                        tool_output = f"ERROR: {ge}"
 
-                    elif tc.name == "run_pytest":
-                        targets = tc.arguments.get("targets")
-                        res = run_pytest(repo_root, targets=targets, python=python)
-                        pytest_runs.append(res)
-                        last_pytest_failed = (
-                            res.failed > 0 or res.errors > 0 or res.exit_code != 0
-                        )
-                        tool_output = (
-                            f"Exit code: {res.exit_code}, passed: {res.passed}, "
-                            f"failed: {res.failed}, errors: {res.errors}, "
-                            f"skipped: {res.skipped}, timed_out: {res.timed_out}\n"
-                            f"Output:\n{res.output}"
-                        )
+                elif tc.name == "run_pytest":
+                    targets = tc.arguments.get("targets")
+                    res = run_pytest(repo_root, targets=targets, python=python)
+                    pytest_runs.append(res)
+                    last_pytest_failed = (
+                        res.failed > 0 or res.errors > 0 or res.exit_code != 0
+                    )
+                    tool_output = (
+                        f"Exit code: {res.exit_code}, passed: {res.passed}, "
+                        f"failed: {res.failed}, errors: {res.errors}, "
+                        f"skipped: {res.skipped}, timed_out: {res.timed_out}\n"
+                        f"Output:\n{res.output}"
+                    )
 
-                    elif tc.name == "get_coverage":
-                        files = tc.arguments.get("files")
-                        cov = get_coverage(repo_root, files=files, python=python)
-                        tool_output = (
-                            f"Total coverage: {cov.total_percent:.2f}%, "
-                            f"files coverage: {cov.files_percent}%\n"
-                            f"Per file: {cov.per_file}"
-                        )
+                elif tc.name == "get_coverage":
+                    files = tc.arguments.get("files")
+                    cov = get_coverage(repo_root, files=files, python=python)
+                    tool_output = (
+                        f"Total coverage: {cov.total_percent:.2f}%, "
+                        f"files coverage: {cov.files_percent}%\n"
+                        f"Per file: {cov.per_file}"
+                    )
 
-                    else:
-                        tool_output = f"ERROR: Unknown tool '{tc.name}'"
+                else:
+                    tool_output = f"ERROR: Unknown tool '{tc.name}'"
 
-                except Exception as exc:  # noqa: BLE001
-                    tool_output = f"ERROR: {exc}"
+            except Exception as exc:  # noqa: BLE001
+                err_type = type(exc).__name__
+                msg = str(redact_data(str(exc)[:800]))
+                stop_reason = "error"
+                final_message = f"{err_type}: {msg}"
+                _emit_event(
+                    on_event,
+                    {
+                        "type": "error",
+                        "where": "tool",
+                        "step": steps,
+                        "error_type": err_type,
+                        "message": msg,
+                    },
+                )
+                should_stop = True
+                break
+
+            if should_stop:
+                break
 
             if len(tool_output) > active_limits.max_tool_output_chars:
                 tool_output = tool_output[: active_limits.max_tool_output_chars]

@@ -3,7 +3,12 @@
 from pr_test_agent.metrics import RunMetrics
 
 
-def render_comment(metrics: RunMetrics, written_tests: list[str], model: str) -> str:
+def render_comment(
+    metrics: RunMetrics,
+    written_tests: list[str],
+    model: str,
+    final_message: str = "",
+) -> str:
     """Render PR comment markdown from run metrics and written tests."""
     if metrics.first_attempt_pass_pct is not None:
         first_pass_str = (
@@ -65,5 +70,8 @@ def render_comment(metrics: RunMetrics, written_tests: list[str], model: str) ->
     if metrics.stop_reason != "done":
         lines.append("")
         lines.append(f"Stopped early: {metrics.stop_reason}")
+        if metrics.stop_reason == "error":
+            err_msg = final_message or getattr(metrics, "final_message", "")
+            lines.append(f"Error: {err_msg}")
 
     return "\n".join(lines) + "\n"

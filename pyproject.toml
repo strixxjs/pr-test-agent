@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pr-test-agent"
+version = "0.1.0"
+description = "An agent that writes pytest tests for code changed in a pull request."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+]
+
+[project.scripts]
+pr-test-agent = "pr_test_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

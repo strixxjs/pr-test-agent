@@ -1,0 +1,156 @@
+name: 'PR Test Agent'
+description: 'Autonomous agent that writes pytest tests for code changed in a pull request'
+inputs:
+  groq-api-key:
+    description: 'Groq API Key'
+    required: true
+  model:
+    description: 'Groq model ID'
+    required: false
+    default: 'qwen/qwen3.8-27b'
+  python-version:
+    description: 'Python version to use'
+    required: false
+    default: '3.12'
+  install-command:
+    description: 'Command to install target repository dependencies'
+    required: false
+    default: 'pip install -r requirements.txt'
+  base-ref:
+    description: 'Base git reference to compare against'
+    required: false
+    default: ${{ github.base_ref }}
+  max-steps:
+    description: 'Maximum agent steps'
+    required: false
+    default: ''
+  max-tokens:
+    description: 'Maximum total tokens budget'
+    required: false
+    default: ''
+  max-fix-attempts:
+    description: 'Maximum test fix attempts'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Set up target repository environment
+      shell: bash
+      run: |
+        python -m venv "${{ runner.temp }}/target_venv"
+        "${{ runner.temp }}/target_venv/bin/pip" install --upgrade pip
+        "${{ runner.temp }}/target_venv/bin/pip" install pytest pytest-asyncio pytest-cov
+        if [ -n "${{ inputs.install-command }}" ]; then
+          cd "$GITHUB_WORKSPACE"
+          PATH="${{ runner.temp }}/target_venv/bin:$PATH"
+          VIRTUAL_ENV="${{ runner.temp }}/target_venv"
+          eval "${{ inputs.install-command }}"
+        fi
+
+    - name: Set up pr-test-agent environment
+      shell: bash
+      run: |
+        python -m venv "${{ runner.temp }}/agent_venv"
+        "${{ runner.temp }}/agent_venv/bin/pip" install --upgrade pip
+        "${{ runner.temp }}/agent_venv/bin/pip" install "${{ github.action_path }}"
+
+    - name: Run pr-test-agent
+      shell: bash
+      env:
+        GROQ_API_KEY: ${{ inputs.groq-api-key }}
+        GROQ_MODEL: ${{ inputs.model }}
+      run: |
+        mkdir -p "${{ runner.temp }}/pr-test-agent-output/logs"
+        JSON_OUT="${{ runner.temp }}/pr-test-agent-output/results.json"
+        COMMENT_OUT="${{ runner.temp }}/pr-test-agent-output/comment.md"
+        LOG_DIR="${{ runner.temp }}/pr-test-agent-output/logs"
+
+        BASE_REF="${{ inputs.base-ref }}"
+        if [[ ! "$BASE_REF" =~ ^origin/ ]]; then
+          BASE_REF="origin/$BASE_REF"
+        fi
+
+        EXTRA_ARGS=()
+        if [ -n "${{ inputs.max-steps }}" ]; then
+          EXTRA_ARGS+=(--max-steps "${{ inputs.max-steps }}")
+        fi
+        if [ -n "${{ inputs.max-tokens }}" ]; then
+          EXTRA_ARGS+=(--max-tokens "${{ inputs.max-tokens }}")
+        fi
+        if [ -n "${{ inputs.max-fix-attempts }}" ]; then
+          EXTRA_ARGS+=(--max-fix-attempts "${{ inputs.max-fix-attempts }}")
+        fi
+
+        set +e
+        "${{ runner.temp }}/agent_venv/bin/pr-test-agent" run \
+          --repo "$GITHUB_WORKSPACE" \
+          --base "$BASE_REF" \
+          --python "${{ runner.temp }}/target_venv/bin/python" \
+          --log-dir "$LOG_DIR" \
+          --json-out "$JSON_OUT" \
+          --comment-out "$COMMENT_OUT" \
+          "${EXTRA_ARGS[@]}"
+        CLI_EXIT=$?
+        set -e
+        echo "$CLI_EXIT" > "${{ runner.temp }}/pr-test-agent-output/exit_code"
+
+    - name: Post or update PR comment
+      if: always()
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        COMMENT_OUT="${{ runner.temp }}/pr-test-agent-output/comment.md"
+        JSON_OUT="${{ runner.temp }}/pr-test-agent-output/results.json"
+
+        if [ -z "$PR_NUMBER" ]; then
+          echo "No pull request number found, skipping comment."
+          exit 0
+        fi
+
+        if [ ! -f "$COMMENT_OUT" ]; then
+          echo -e "<!-- pr-test-agent -->\n### PR Test Agent\n\nAgent encountered a fatal error before generating a comment. Please check workflow run logs." > "$COMMENT_OUT"
+        fi
+
+        COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" --paginate --jq '.[] | select(.body | contains("<!-- pr-test-agent -->")) | .id' | head -n 1)
+
+        if [ -n "$COMMENT_ID" ]; then
+          gh api -X PATCH "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" -F body=@"$COMMENT_OUT"
+        else
+          gh api -X POST "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" -F body=@"$COMMENT_OUT"
+        fi
+
+        CLI_EXIT=0
+        if [ -f "${{ runner.temp }}/pr-test-agent-output/exit_code" ]; then
+          CLI_EXIT=$(cat "${{ runner.temp }}/pr-test-agent-output/exit_code")
+        fi
+
+        IS_CRASH=1
+        if [ -f "$JSON_OUT" ]; then
+          if python3 -c 'import json, sys; d=json.load(open(sys.argv[1])); sys.exit(0 if "stop_reason" in d else 1)' "$JSON_OUT" 2>/dev/null; then
+            IS_CRASH=0
+          fi
+        fi
+
+        if [ "$IS_CRASH" -eq 1 ] && [ "$CLI_EXIT" -ne 0 ]; then
+          echo "pr-test-agent crashed with exit code $CLI_EXIT" >&2
+          exit "$CLI_EXIT"
+        fi
+
+    - name: Upload run artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: pr-test-agent-artifacts
+        path: |
+          ${{ runner.temp }}/pr-test-agent-output/results.json
+          ${{ runner.temp }}/pr-test-agent-output/logs/*.jsonl
+        if-no-files-found: ignore

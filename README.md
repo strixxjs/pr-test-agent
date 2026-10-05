@@ -4,6 +4,58 @@ An autonomous agent that analyzes code changes in pull requests and writes pytes
 
 Status: work in progress
 
+## Quick start (2 minutes)
+
+1. Add the secret `GROQ_API_KEY` to your GitHub repository under **Settings > Secrets and variables > Actions**.
+2. Copy `examples/pr-test-agent.yml` into `.github/workflows/pr-test-agent.yml` in your repository:
+
+```yaml
+name: PR Test Agent
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-test-agent-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run PR Test Agent
+        uses: strixxjs/pr-test-agent@main
+        with:
+          groq-api-key: ${{ secrets.GROQ_API_KEY }}
+```
+
+3. Open a pull request. The agent runs in the runner workspace, executes tests, and posts a markdown summary comment.
+
+## Safety
+
+- **Writes only to `tests/`**: The agent is restricted to writing test files in `tests/test_*.py`. It cannot modify application source code.
+- **Nothing is committed or pushed**: The agent executes purely within the ephemeral runner workspace. It never commits, pushes, or alters the pull request branch.
+- **Iteration, token, and fix limits**: Strict limits (`max-steps`, `max-tokens`, `max-fix-attempts`) prevent runaway execution, high token usage, and endless test fix loops.
+- **No fork secrets**: The example workflow triggers strictly on `pull_request` (never `pull_request_target`) and enforces a fork guard (`if: github.event.pull_request.head.repo.full_name == github.repository`) so repository secrets are not exposed to external forks.
+- **Minimal permissions**: Requests only `contents: read` and `pull-requests: write`.
+
+## Known limitations
+
+- **Free-tier rate limits**: Groq free-tier accounts are subject to requests-per-minute (RPM) and tokens-per-minute (TPM) limits that may be reached on larger PR diffs.
+- **Tool-call JSON parsing**: Smaller models may occasionally produce invalid tool-call JSON arguments; transient tool call failures are retried automatically, but retries are limited.
+- **Fix limits**: Test repair attempts are bounded (default: 3) to prevent wasting tokens on tests that require deep architectural changes or external mocks.
+
 ## Local usage
 
 ### Requirements
@@ -33,7 +85,7 @@ cp .env.example .env
 
 Set the required environment variables:
 - `GROQ_API_KEY`: Your Groq API key.
-- `GROQ_MODEL`: Supported Groq model ID (e.g. `llama-3.3-70b-versatile`).
+- `GROQ_MODEL`: Supported Groq model ID (e.g. `qwen/qwen3.8-27b`).
 - `PRICE_IN_PER_MTOK`: (Optional) Price in USD per million input tokens.
 - `PRICE_OUT_PER_MTOK`: (Optional) Price in USD per million output tokens.
 

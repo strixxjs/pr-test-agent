@@ -1,0 +1,351 @@
+from pathlib import Path
+from typing import Any
+
+from pr_test_agent.agent import Limits, run_agent
+from pr_test_agent.llm import LLMReply, ToolCall
+
+
+class FakeClient:
+    def __init__(self, replies: list[LLMReply]) -> None:
+        self.replies = list(replies)
+        self.call_count = 0
+        self.calls: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
+
+    def chat(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> LLMReply:
+        self.calls.append((messages, tools))
+        if self.call_count < len(self.replies):
+            reply = self.replies[self.call_count]
+            self.call_count += 1
+            return reply
+        return LLMReply(
+            content="Done",
+            tool_calls=[],
+            prompt_tokens=10,
+            completion_tokens=10,
+        )
+
+
+def test_agent_happy_path(git_repo: Path) -> None:
+    test_code = "def test_math_add() -> None:\n    assert True\n"
+    replies = [
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_1",
+                    name="write_test",
+                    arguments={"path": "tests/test_math_add.py", "content": test_code},
+                )
+            ],
+            prompt_tokens=50,
+            completion_tokens=20,
+        ),
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_2",
+                    name="run_pytest",
+                    arguments={"targets": ["tests/test_math_add.py"]},
+                )
+            ],
+            prompt_tokens=60,
+            completion_tokens=15,
+        ),
+        LLMReply(
+            content="All tests pass successfully.",
+            tool_calls=[],
+            prompt_tokens=40,
+            completion_tokens=10,
+        ),
+    ]
+    client = FakeClient(replies)
+    result = run_agent(git_repo, "main", client)
+
+    assert result.stop_reason == "done"
+    assert result.written_tests == ["tests/test_math_add.py"]
+    assert len(result.pytest_runs) == 1
+    assert result.pytest_runs[0].passed >= 1
+    assert result.final_message == "All tests pass successfully."
+    assert result.steps == 3
+
+
+def test_agent_fix_path(git_repo: Path) -> None:
+    failing_test = "def test_fail() -> None:\n    assert False\n"
+    passing_test = "def test_pass() -> None:\n    assert True\n"
+    replies = [
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_1",
+                    name="write_test",
+                    arguments={"path": "tests/test_fix.py", "content": failing_test},
+                )
+            ],
+            prompt_tokens=50,
+            completion_tokens=20,
+        ),
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_2",
+                    name="run_pytest",
+                    arguments={"targets": ["tests/test_fix.py"]},
+                )
+            ],
+            prompt_tokens=60,
+            completion_tokens=15,
+        ),
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_3",
+                    name="write_test",
+                    arguments={"path": "tests/test_fix.py", "content": passing_test},
+                )
+            ],
+            prompt_tokens=70,
+            completion_tokens=20,
+        ),
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_4",
+                    name="run_pytest",
+                    arguments={"targets": ["tests/test_fix.py"]},
+                )
+            ],
+            prompt_tokens=80,
+            completion_tokens=15,
+        ),
+        LLMReply(
+            content="Tests fixed and passed.",
+            tool_calls=[],
+            prompt_tokens=30,
+            completion_tokens=10,
+        ),
+    ]
+    client = FakeClient(replies)
+    result = run_agent(git_repo, "main", client)
+
+    assert result.stop_reason == "done"
+    assert len(result.pytest_runs) == 2
+    assert result.pytest_runs[0].failed == 1
+    assert result.pytest_runs[1].passed == 1
+
+
+def test_agent_fix_attempts_exhausted(git_repo: Path) -> None:
+    failing_test = "def test_fail() -> None:\n    assert False\n"
+    replies = [
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="write_test",
+                    arguments={"path": "tests/test_exhaust.py", "content": failing_test},
+                )
+            ],
+            prompt_tokens=20,
+            completion_tokens=10,
+        ),
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="c2",
+                    name="run_pytest",
+                    arguments={"targets": ["tests/test_exhaust.py"]},
+                )
+            ],
+            prompt_tokens=20,
+            completion_tokens=10,
+        ),
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="c3",
+                    name="write_test",
+                    arguments={"path": "tests/test_exhaust.py", "content": failing_test},
+                )
+            ],
+            prompt_tokens=20,
+            completion_tokens=10,
+        ),
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="c4",
+                    name="run_pytest",
+                    arguments={"targets": ["tests/test_exhaust.py"]},
+                )
+            ],
+            prompt_tokens=20,
+            completion_tokens=10,
+        ),
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="c5",
+                    name="write_test",
+                    arguments={"path": "tests/test_exhaust.py", "content": failing_test},
+                )
+            ],
+            prompt_tokens=20,
+            completion_tokens=10,
+        ),
+    ]
+    client = FakeClient(replies)
+    limits = Limits(max_fix_attempts=1)
+    result = run_agent(git_repo, "main", client, limits=limits)
+
+    assert result.stop_reason == "fix_attempts_exhausted"
+
+
+def test_agent_max_steps(git_repo: Path) -> None:
+    replies = [
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id=f"step_{i}",
+                    name="read_file",
+                    arguments={"path": "src/math_ops.py"},
+                )
+            ],
+            prompt_tokens=10,
+            completion_tokens=10,
+        )
+        for i in range(5)
+    ]
+    client = FakeClient(replies)
+    limits = Limits(max_steps=2)
+    result = run_agent(git_repo, "main", client, limits=limits)
+
+    assert result.stop_reason == "max_steps"
+    assert result.steps == 2
+
+
+def test_agent_token_budget(git_repo: Path) -> None:
+    replies = [
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="read_file",
+                    arguments={"path": "src/math_ops.py"},
+                )
+            ],
+            prompt_tokens=60,
+            completion_tokens=50,
+        ),
+        LLMReply(
+            content="Done",
+            tool_calls=[],
+            prompt_tokens=10,
+            completion_tokens=10,
+        ),
+    ]
+    client = FakeClient(replies)
+    limits = Limits(max_total_tokens=100)
+    result = run_agent(git_repo, "main", client, limits=limits)
+
+    assert result.stop_reason == "token_budget"
+    assert result.total_tokens == 110
+
+
+def test_agent_guard_error_preserves_production_file(git_repo: Path) -> None:
+    prod_file = git_repo / "src" / "math_ops.py"
+    original_code = prod_file.read_text(encoding="utf-8")
+
+    replies = [
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="write_test",
+                    arguments={
+                        "path": "src/math_ops.py",
+                        "content": "def hacked() -> None: pass\n",
+                    },
+                )
+            ],
+            prompt_tokens=20,
+            completion_tokens=10,
+        ),
+        LLMReply(
+            content="Cannot write to production files.",
+            tool_calls=[],
+            prompt_tokens=20,
+            completion_tokens=10,
+        ),
+    ]
+    client = FakeClient(replies)
+    result = run_agent(git_repo, "main", client)
+
+    assert result.stop_reason == "done"
+    assert prod_file.read_text(encoding="utf-8") == original_code
+
+    second_call_messages = client.calls[1][0]
+    tool_resp = next(m for m in second_call_messages if m.get("role") == "tool")
+    assert tool_resp["content"].startswith("ERROR: Path must be inside tests directory")
+
+
+def test_agent_no_changed_functions(git_repo: Path) -> None:
+    client = FakeClient([])
+    # Comparing feature branch against feature branch yields no changes
+    result = run_agent(git_repo, "feature", client)
+
+    assert result.stop_reason == "done"
+    assert result.steps == 0
+    assert client.call_count == 0
+
+
+def test_agent_events_emitted(git_repo: Path) -> None:
+    events: list[dict[str, Any]] = []
+    replies = [
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="read_file",
+                    arguments={"path": "src/math_ops.py"},
+                )
+            ],
+            prompt_tokens=15,
+            completion_tokens=10,
+        ),
+        LLMReply(
+            content="Finished inspecting.",
+            tool_calls=[],
+            prompt_tokens=15,
+            completion_tokens=5,
+        ),
+    ]
+    client = FakeClient(replies)
+    result = run_agent(git_repo, "main", client, on_event=events.append)
+
+    assert result.stop_reason == "done"
+    assert len(events) >= 3  # 2 llm events + 1 tool event
+
+    types = [e["type"] for e in events]
+    assert "llm" in types
+    assert "tool" in types
+
+    for ev in events:
+        assert "type" in ev
+        assert "step" in ev
+        assert "name" in ev
+        assert "tokens" in ev

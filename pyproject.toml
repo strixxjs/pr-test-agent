@@ -9,6 +9,7 @@ description = "An agent that writes pytest tests for code changed in a pull requ
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "groq",
     "pytest",
     "pytest-asyncio",
     "pytest-cov",

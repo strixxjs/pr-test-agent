@@ -66,6 +66,7 @@ def test_groq_client_chat_success(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert reply.prompt_tokens == 25
     assert reply.completion_tokens == 15
+    assert client.client.chat.completions.create.call_args[1]["max_tokens"] == 4000
 
 
 def test_groq_client_429_retry_and_exhaustion(monkeypatch: pytest.MonkeyPatch) -> None:

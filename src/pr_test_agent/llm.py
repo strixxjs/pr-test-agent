@@ -56,7 +56,7 @@ class GroqClient:
             "model": self.model,
             "messages": messages,
             "temperature": 0.2,
-            "max_tokens": 2000,
+            "max_tokens": 4000,
         }
         if tools:
             kwargs["tools"] = tools

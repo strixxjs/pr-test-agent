@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pr_test_agent.guards import GuardError
-from pr_test_agent.llm import LLMClient
+from pr_test_agent.llm import LLMClient, LLMToolCallError
 from pr_test_agent.runlog import redact_data
 from pr_test_agent.tools import (
     PytestResult,
@@ -28,6 +28,8 @@ SYSTEM_PROMPT = (
     "If importing needs heavy or networked dependencies, mock them via monkeypatch or sys.modules before import. "
     "Tests must never touch network, Qdrant or real APIs. "
     "Do not leave unused imports. "
+    "Each test file must be short, under 80 lines. "
+    "Prefer several small tests over one large helper. "
     "Write tests only for the changed functions. Use pytest-asyncio for async functions. "
     "Write tests only under tests/ with file names matching test_*.py. "
     "Never edit production code. After writing tests, run pytest. "
@@ -253,6 +255,7 @@ def run_agent(
     last_pytest_failed = False
     fix_attempts = 0
     nudge_count = 0
+    tool_retry_count = 0
 
     while True:
         if steps >= active_limits.max_steps:
@@ -266,6 +269,45 @@ def run_agent(
 
         try:
             reply = client.chat(messages=messages, tools=TOOL_DEFINITIONS)
+        except LLMToolCallError as exc:
+            tool_retry_count += 1
+            if tool_retry_count <= 3:
+                _emit_event(
+                    on_event,
+                    {
+                        "type": "retry",
+                        "reason": "tool_use_failed",
+                        "attempt": tool_retry_count,
+                    },
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your last tool call was rejected because its JSON arguments "
+                            "were invalid. Retry the call. Keep test files short (under 80 lines), "
+                            "put one test file per source module, avoid complex escaping and avoid "
+                            "triple-quoted strings inside the test content."
+                        ),
+                    }
+                )
+                continue
+
+            err_type = type(exc).__name__
+            msg = str(redact_data(str(exc)[:800]))
+            stop_reason = "error"
+            final_message = f"{err_type}: {msg}"
+            _emit_event(
+                on_event,
+                {
+                    "type": "error",
+                    "where": "llm",
+                    "step": steps,
+                    "error_type": err_type,
+                    "message": msg,
+                },
+            )
+            break
         except Exception as exc:  # noqa: BLE001
             err_type = type(exc).__name__
             msg = str(redact_data(str(exc)[:800]))

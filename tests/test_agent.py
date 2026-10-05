@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from pr_test_agent.agent import Limits, run_agent
-from pr_test_agent.llm import LLMReply, ToolCall
+from pr_test_agent.llm import LLMReply, LLMToolCallError, ToolCall
 from pr_test_agent.runlog import RunLog
 
 
@@ -619,3 +619,85 @@ def test_agent_nudge_ignored_twice_stops_done_with_uncovered(git_repo: Path) -> 
     assert result.uncovered_functions == ["src/math_ops.py:async_mul"]
     assert result.functions_total == 2
     assert result.functions_referenced == 1
+
+
+def test_agent_tool_use_failed_retry_once_then_success(git_repo: Path) -> None:
+    test_code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))\n"
+        "from math_ops import add, async_mul\n\n"
+        "def test_math_add():\n"
+        "    assert add(1, 2) == 3\n"
+        "    assert callable(async_mul)\n"
+    )
+    replies: list[LLMReply | Exception] = [
+        LLMToolCallError("tool_use_failed: Failed to parse tool call arguments as JSON"),
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_1",
+                    name="write_test",
+                    arguments={"path": "tests/test_retry.py", "content": test_code},
+                )
+            ],
+            prompt_tokens=30,
+            completion_tokens=15,
+        ),
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_2",
+                    name="run_pytest",
+                    arguments={"targets": ["tests/test_retry.py"]},
+                )
+            ],
+            prompt_tokens=40,
+            completion_tokens=10,
+        ),
+        LLMReply(
+            content="Tests passed.",
+            tool_calls=[],
+            prompt_tokens=20,
+            completion_tokens=5,
+        ),
+    ]
+
+    events: list[dict[str, Any]] = []
+    client = FakeClient(replies)
+    result = run_agent(git_repo, "main", client, on_event=events.append)
+
+    assert result.stop_reason == "done"
+    retry_events = [e for e in events if e.get("type") == "retry"]
+    assert len(retry_events) == 1
+    assert retry_events[0]["reason"] == "tool_use_failed"
+    assert retry_events[0]["attempt"] == 1
+
+    second_call_messages = client.calls[1][0]
+    last_msg = second_call_messages[-1]
+    assert last_msg["role"] == "user"
+    assert "Your last tool call was rejected because its JSON arguments were invalid." in last_msg["content"]
+
+
+def test_agent_four_tool_use_failed_stops_with_error(git_repo: Path) -> None:
+    replies: list[LLMReply | Exception] = [
+        LLMToolCallError("tool_use_failed: 1"),
+        LLMToolCallError("tool_use_failed: 2"),
+        LLMToolCallError("tool_use_failed: 3"),
+        LLMToolCallError("tool_use_failed: 4"),
+    ]
+    events: list[dict[str, Any]] = []
+    client = FakeClient(replies)
+    result = run_agent(git_repo, "main", client, on_event=events.append)
+
+    assert result.stop_reason == "error"
+    assert "LLMToolCallError" in result.final_message
+    retry_events = [e for e in events if e.get("type") == "retry"]
+    assert len(retry_events) == 3
+    assert [e["attempt"] for e in retry_events] == [1, 2, 3]
+
+    error_events = [e for e in events if e.get("type") == "error"]
+    assert len(error_events) == 1
+    assert error_events[0]["error_type"] == "LLMToolCallError"

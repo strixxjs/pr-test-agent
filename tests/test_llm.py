@@ -2,9 +2,9 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-from groq import RateLimitError
+from groq import BadRequestError, RateLimitError
 
-from pr_test_agent.llm import GroqClient, LLMReply, ToolCall
+from pr_test_agent.llm import GroqClient, LLMReply, LLMToolCallError, ToolCall
 
 
 def test_groq_client_missing_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,3 +90,52 @@ def test_groq_client_429_retry_and_exhaustion(monkeypatch: pytest.MonkeyPatch) -
 
     assert mock_sleep.call_count == 3
     mock_sleep.assert_called_with(5.0)
+
+
+def test_groq_client_bad_request_tool_use_failed_becomes_llm_tool_call_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", "dummy_key")
+    monkeypatch.setenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+    client = GroqClient()
+    http_resp = httpx.Response(
+        status_code=400,
+        request=httpx.Request("POST", "https://api.groq.com/chat"),
+    )
+    long_msg = "tool_use_failed: Failed to parse tool call arguments as JSON: " + ("x" * 400)
+    err = BadRequestError(
+        long_msg,
+        response=http_resp,
+        body={"error": {"code": "tool_use_failed", "message": long_msg}},
+    )
+    client.client.chat.completions.create = MagicMock(side_effect=err)  # type: ignore[method-assign]
+
+    with pytest.raises(LLMToolCallError) as exc_info:
+        client.chat(messages=[], tools=[])
+
+    msg = str(exc_info.value)
+    assert "tool_use_failed" in msg
+    assert len(msg) <= 300
+
+
+def test_groq_client_bad_request_other_stays_bad_request_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", "dummy_key")
+    monkeypatch.setenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+    client = GroqClient()
+    http_resp = httpx.Response(
+        status_code=400,
+        request=httpx.Request("POST", "https://api.groq.com/chat"),
+    )
+    err = BadRequestError(
+        "Invalid model parameter: max_tokens exceeds context window",
+        response=http_resp,
+        body={"error": {"code": "invalid_parameter", "message": "Invalid model parameter"}},
+    )
+    client.client.chat.completions.create = MagicMock(side_effect=err)  # type: ignore[method-assign]
+
+    with pytest.raises(BadRequestError):
+        client.chat(messages=[], tools=[])

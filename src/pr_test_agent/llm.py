@@ -6,7 +6,11 @@ import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from groq import Groq, RateLimitError
+from groq import BadRequestError, Groq, RateLimitError
+
+
+class LLMToolCallError(Exception):
+    """Raised when the LLM provider fails to parse tool call arguments as JSON."""
 
 
 @dataclass
@@ -66,6 +70,25 @@ class GroqClient:
             try:
                 response = self.client.chat.completions.create(**kwargs)
                 break
+            except BadRequestError as exc:
+                err_str = str(exc)
+                code = getattr(exc, "code", "") or ""
+                body = getattr(exc, "body", None)
+                body_code = ""
+                body_msg = ""
+                if isinstance(body, dict):
+                    err_dict = body.get("error")
+                    if isinstance(err_dict, dict):
+                        body_code = str(err_dict.get("code") or "")
+                        body_msg = str(err_dict.get("message") or "")
+                if (
+                    "tool_use_failed" in err_str
+                    or "tool_use_failed" in str(code)
+                    or "tool_use_failed" in body_code
+                    or "tool_use_failed" in body_msg
+                ):
+                    raise LLMToolCallError(err_str[:300]) from exc
+                raise
             except RateLimitError as exc:
                 attempts += 1
                 if attempts > 3:

@@ -226,6 +226,7 @@ def read_diff(
         capture_output=True,
         text=True,
         check=True,
+        stdin=subprocess.DEVNULL,
     )
     raw_diff = proc.stdout
     files = _parse_diff_output(repo_root, raw_diff)
@@ -326,6 +327,7 @@ def run_pytest(
                 text=True,
                 timeout=timeout,
                 check=False,
+                stdin=subprocess.DEVNULL,
             )
             exit_code = proc.returncode
             stdout = proc.stdout
@@ -406,6 +408,7 @@ def get_coverage(
                 text=True,
                 timeout=timeout,
                 check=False,
+                stdin=subprocess.DEVNULL,
             )
             exit_code = proc.returncode
         except (subprocess.TimeoutExpired, OSError):

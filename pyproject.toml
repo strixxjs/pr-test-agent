@@ -13,6 +13,7 @@ dependencies = [
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
+    "python-dotenv",
 ]
 
 [project.optional-dependencies]

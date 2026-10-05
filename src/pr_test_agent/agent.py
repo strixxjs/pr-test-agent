@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -133,6 +134,7 @@ def run_agent(
     client: LLMClient,
     limits: Limits | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    python: str = sys.executable,
 ) -> AgentResult:
     """Execute the PR test writing agent loop."""
     active_limits = limits if limits is not None else Limits()
@@ -275,7 +277,7 @@ def run_agent(
 
                     elif tc.name == "run_pytest":
                         targets = tc.arguments.get("targets")
-                        res = run_pytest(repo_root, targets=targets)
+                        res = run_pytest(repo_root, targets=targets, python=python)
                         pytest_runs.append(res)
                         last_pytest_failed = (
                             res.failed > 0 or res.errors > 0 or res.exit_code != 0
@@ -289,7 +291,7 @@ def run_agent(
 
                     elif tc.name == "get_coverage":
                         files = tc.arguments.get("files")
-                        cov = get_coverage(repo_root, files=files)
+                        cov = get_coverage(repo_root, files=files, python=python)
                         tool_output = (
                             f"Total coverage: {cov.total_percent:.2f}%, "
                             f"files coverage: {cov.files_percent}%\n"

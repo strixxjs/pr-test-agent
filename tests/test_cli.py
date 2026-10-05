@@ -51,7 +51,15 @@ def test_cli_full_run_with_fake_client(
     monkeypatch.setenv("GROQ_API_KEY", "fake_cli_key")
     monkeypatch.setenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-    test_content = "def test_cli_add() -> None:\n    assert True\n"
+    test_content = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))\n"
+        "from math_ops import add, async_mul\n\n"
+        "def test_cli_add() -> None:\n"
+        "    assert add(1, 2) == 3\n"
+        "    assert callable(async_mul)\n"
+    )
     replies = [
         LLMReply(
             content=None,

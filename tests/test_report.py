@@ -19,6 +19,9 @@ def test_render_comment_marker_and_format() -> None:
         estimated_cost_usd=0.0012,
         duration_s=4.5,
         stop_reason="done",
+        functions_total=3,
+        functions_referenced=3,
+        test_cases=4,
     )
     written_tests = ["tests/test_a.py", "tests/test_b.py"]
 
@@ -29,7 +32,8 @@ def test_render_comment_marker_and_format() -> None:
     assert lines[0] == "<!-- pr-test-agent -->"
     assert lines[1] == "## PR Test Agent"
 
-    assert "| Tests added | 3 |" in comment
+    assert "| Tests added | 3 functions / 4 cases |" in comment
+    assert "| Changed functions with tests | 3/3 |" in comment
     assert "| Passed on first attempt | 3/4 (75.0%) |" in comment
     assert "| Fix attempts | 1 |" in comment
     assert "| Coverage | 50.0% -> 80.0% (+30.0%) |" in comment
@@ -128,3 +132,35 @@ def test_render_comment_error_stop_reason() -> None:
 
     assert "Stopped early: error" in comment
     assert "Error: RuntimeError: Groq rate limit exceeded" in comment
+
+
+def test_render_comment_uncovered_functions() -> None:
+    metrics = RunMetrics(
+        tests_added=1,
+        first_run_total=1,
+        first_run_passed=1,
+        first_attempt_pass_pct=100.0,
+        final_passed=1,
+        final_failed=0,
+        fix_attempts=0,
+        coverage_before_pct=20.0,
+        coverage_after_pct=25.0,
+        coverage_delta_pct=5.0,
+        prompt_tokens=100,
+        completion_tokens=50,
+        estimated_cost_usd=None,
+        duration_s=2.0,
+        stop_reason="done",
+        functions_total=2,
+        functions_referenced=1,
+        test_cases=1,
+        uncovered_functions=["src/math_ops.py:async_mul"],
+    )
+
+    comment = render_comment(
+        metrics, written_tests=["tests/test_math.py"], model="test-model"
+    )
+
+    assert "| Tests added | 1 functions / 1 cases |" in comment
+    assert "| Changed functions with tests | 1/2 |" in comment
+    assert "Not covered: src/math_ops.py:async_mul" in comment

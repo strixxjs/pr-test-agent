@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -22,6 +23,11 @@ from pr_test_agent.tools import (
 
 SYSTEM_PROMPT = (
     "You are an expert test agent that writes pytest tests for code changed in a pull request. "
+    "Cover EVERY changed function listed in the first message, not only the first file. "
+    "Import the module the way the repo does (module path derived from the file path, e.g. webhook.py -> `import webhook`). "
+    "If importing needs heavy or networked dependencies, mock them via monkeypatch or sys.modules before import. "
+    "Tests must never touch network, Qdrant or real APIs. "
+    "Do not leave unused imports. "
     "Write tests only for the changed functions. Use pytest-asyncio for async functions. "
     "Write tests only under tests/ with file names matching test_*.py. "
     "Never edit production code. After writing tests, run pytest. "
@@ -120,6 +126,31 @@ class AgentResult:
     pytest_runs: list[PytestResult] = field(default_factory=list)
     written_tests: list[str] = field(default_factory=list)
     final_message: str = ""
+    uncovered_functions: list[str] = field(default_factory=list)
+    functions_total: int = 0
+    functions_referenced: int = 0
+
+
+def _find_uncovered_functions(
+    repo_root: Path,
+    all_changed_funcs: list[tuple[str, str]],
+    written_tests: list[str],
+) -> list[str]:
+    test_contents: list[str] = []
+    for path_str in written_tests:
+        p = repo_root / path_str
+        if p.is_file():
+            with contextlib.suppress(OSError):
+                test_contents.append(p.read_text(encoding="utf-8"))
+
+    combined_tests = "\n".join(test_contents)
+    missing: list[str] = []
+    for file_path, func_name in all_changed_funcs:
+        unqualified = func_name.split(".")[-1]
+        pattern = rf"\b{re.escape(unqualified)}\b"
+        if not re.search(pattern, combined_tests):
+            missing.append(f"{file_path}:{func_name}")
+    return missing
 
 
 def _emit_event(
@@ -142,8 +173,12 @@ def run_agent(
     active_limits = limits if limits is not None else Limits()
     try:
         diff_res = read_diff(repo_root, base_ref)
-        has_changed_funcs = any(len(f.functions) > 0 for f in diff_res.files)
-        if not has_changed_funcs:
+        all_changed_funcs: list[tuple[str, str]] = [
+            (f.path, fn.name)
+            for f in diff_res.files
+            for fn in f.functions
+        ]
+        if not all_changed_funcs:
             return AgentResult(
                 stop_reason="done",
                 steps=0,
@@ -153,6 +188,9 @@ def run_agent(
                 pytest_runs=[],
                 written_tests=[],
                 final_message="No changed functions found in diff.",
+                uncovered_functions=[],
+                functions_total=0,
+                functions_referenced=0,
             )
 
         file_summaries: list[str] = []
@@ -198,6 +236,9 @@ def run_agent(
             pytest_runs=[],
             written_tests=[],
             final_message=f"{err_type}: {msg}",
+            uncovered_functions=[],
+            functions_total=0,
+            functions_referenced=0,
         )
 
     steps = 0
@@ -211,6 +252,7 @@ def run_agent(
 
     last_pytest_failed = False
     fix_attempts = 0
+    nudge_count = 0
 
     while True:
         if steps >= active_limits.max_steps:
@@ -264,6 +306,29 @@ def run_agent(
         )
 
         if not reply.tool_calls:
+            missing = _find_uncovered_functions(
+                repo_root, all_changed_funcs, written_tests
+            )
+            if missing and nudge_count < 2:
+                nudge_count += 1
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": reply.content or "",
+                    }
+                )
+                missing_str = ", ".join(missing)
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Missing tests for: {missing_str}. "
+                            "Write them now, then run pytest."
+                        ),
+                    }
+                )
+                continue
+
             stop_reason = "done"
             final_message = reply.content or ""
             break
@@ -395,6 +460,12 @@ def run_agent(
         if should_stop:
             break
 
+    uncovered = _find_uncovered_functions(
+        repo_root, all_changed_funcs, written_tests
+    )
+    total_f = len(all_changed_funcs)
+    referenced_f = total_f - len(uncovered)
+
     return AgentResult(
         stop_reason=stop_reason,
         steps=steps,
@@ -404,4 +475,7 @@ def run_agent(
         pytest_runs=pytest_runs,
         written_tests=written_tests,
         final_message=final_message,
+        uncovered_functions=uncovered,
+        functions_total=total_f,
+        functions_referenced=referenced_f,
     )

@@ -18,7 +18,7 @@ class FakeClient:
     def chat(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
     ) -> LLMReply:
-        self.calls.append((messages, tools))
+        self.calls.append((list(messages), tools))
         if self.call_count < len(self.replies):
             reply = self.replies[self.call_count]
             self.call_count += 1
@@ -34,7 +34,15 @@ class FakeClient:
 
 
 def test_agent_happy_path(git_repo: Path) -> None:
-    test_code = "def test_math_add() -> None:\n    assert True\n"
+    test_code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))\n"
+        "from math_ops import add, async_mul\n\n"
+        "def test_math_add() -> None:\n"
+        "    assert add(1, 2) == 3\n"
+        "    assert callable(async_mul)\n"
+    )
     replies = [
         LLMReply(
             content=None,
@@ -79,8 +87,16 @@ def test_agent_happy_path(git_repo: Path) -> None:
 
 
 def test_agent_fix_path(git_repo: Path) -> None:
-    failing_test = "def test_fail() -> None:\n    assert False\n"
-    passing_test = "def test_pass() -> None:\n    assert True\n"
+    failing_test = "def test_fail() -> None:\n    assert False  # add async_mul\n"
+    passing_test = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))\n"
+        "from math_ops import add, async_mul\n\n"
+        "def test_pass() -> None:\n"
+        "    assert add(1, 2) == 3\n"
+        "    assert callable(async_mul)\n"
+    )
     replies = [
         LLMReply(
             content=None,
@@ -438,3 +454,168 @@ def test_agent_error_on_tool_execution(
     error_events = [ev for ev in events if ev.get("type") == "error"]
     assert len(error_events) == 1
     assert error_events[0]["where"] == "tool"
+
+
+def test_agent_nudge_when_function_missing(git_repo: Path) -> None:
+    # Model only tests add at first, gets nudged, then tests async_mul
+    test_add_only = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))\n"
+        "from math_ops import add\n\n"
+        "def test_math_add():\n"
+        "    assert add(1, 2) == 3\n"
+    )
+    test_async_mul = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))\n"
+        "from math_ops import async_mul\n\n"
+        "def test_math_mul():\n"
+        "    assert callable(async_mul)\n"
+    )
+    replies = [
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_1",
+                    name="write_test",
+                    arguments={
+                        "path": "tests/test_math_add.py",
+                        "content": test_add_only,
+                    },
+                )
+            ],
+            prompt_tokens=30,
+            completion_tokens=15,
+        ),
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_2",
+                    name="run_pytest",
+                    arguments={"targets": ["tests/test_math_add.py"]},
+                )
+            ],
+            prompt_tokens=40,
+            completion_tokens=10,
+        ),
+        # Model tries to finish having only tested add
+        LLMReply(
+            content="Finished writing tests for add.",
+            tool_calls=[],
+            prompt_tokens=20,
+            completion_tokens=5,
+        ),
+        # After nudge, model writes test for async_mul
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_3",
+                    name="write_test",
+                    arguments={
+                        "path": "tests/test_math_mul.py",
+                        "content": test_async_mul,
+                    },
+                )
+            ],
+            prompt_tokens=40,
+            completion_tokens=15,
+        ),
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_4",
+                    name="run_pytest",
+                    arguments={"targets": ["tests/test_math_mul.py"]},
+                )
+            ],
+            prompt_tokens=40,
+            completion_tokens=10,
+        ),
+        # Model finishes
+        LLMReply(
+            content="Now all functions tested.",
+            tool_calls=[],
+            prompt_tokens=20,
+            completion_tokens=5,
+        ),
+    ]
+
+    client = FakeClient(replies)
+    result = run_agent(git_repo, "main", client)
+
+    assert result.stop_reason == "done"
+    assert result.uncovered_functions == []
+    assert result.functions_total == 2
+    assert result.functions_referenced == 2
+
+    # Verify that the 4th client call (after nudge) has the nudge message
+    fourth_call_messages = client.calls[3][0]
+    nudge_user_msg = fourth_call_messages[-1]
+    assert nudge_user_msg["role"] == "user"
+    assert (
+        "Missing tests for: src/math_ops.py:async_mul. Write them now, then run pytest."
+        in nudge_user_msg["content"]
+    )
+
+
+def test_agent_nudge_ignored_twice_stops_done_with_uncovered(git_repo: Path) -> None:
+    test_add_only = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))\n"
+        "from math_ops import add\n\n"
+        "def test_math_add():\n"
+        "    assert add(1, 2) == 3\n"
+    )
+    replies = [
+        LLMReply(
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_1",
+                    name="write_test",
+                    arguments={
+                        "path": "tests/test_math_add.py",
+                        "content": test_add_only,
+                    },
+                )
+            ],
+            prompt_tokens=30,
+            completion_tokens=15,
+        ),
+        # Model tries to finish
+        LLMReply(
+            content="Done with add.",
+            tool_calls=[],
+            prompt_tokens=20,
+            completion_tokens=5,
+        ),
+        # Model ignores nudge 1
+        LLMReply(
+            content="Ignoring nudge 1.",
+            tool_calls=[],
+            prompt_tokens=20,
+            completion_tokens=5,
+        ),
+        # Model ignores nudge 2
+        LLMReply(
+            content="Ignoring nudge 2.",
+            tool_calls=[],
+            prompt_tokens=20,
+            completion_tokens=5,
+        ),
+    ]
+
+    client = FakeClient(replies)
+    result = run_agent(git_repo, "main", client)
+
+    assert result.stop_reason == "done"
+    assert result.uncovered_functions == ["src/math_ops.py:async_mul"]
+    assert result.functions_total == 2
+    assert result.functions_referenced == 1

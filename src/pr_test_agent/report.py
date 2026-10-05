@@ -8,6 +8,7 @@ def render_comment(
     written_tests: list[str],
     model: str,
     final_message: str = "",
+    uncovered_functions: list[str] | None = None,
 ) -> str:
     """Render PR comment markdown from run metrics and written tests."""
     if metrics.first_attempt_pass_pct is not None:
@@ -47,13 +48,21 @@ def render_comment(
         else "- None"
     )
 
+    cases_val = (
+        f"{metrics.test_cases}"
+        if metrics.test_cases is not None
+        else "n/a"
+    )
+    tests_added_str = f"{metrics.tests_added} functions / {cases_val} cases"
+
     lines = [
         "<!-- pr-test-agent -->",
         "## PR Test Agent",
         "",
         "| Metric | Value |",
         "| --- | --- |",
-        f"| Tests added | {metrics.tests_added} |",
+        f"| Tests added | {tests_added_str} |",
+        f"| Changed functions with tests | {metrics.functions_referenced}/{metrics.functions_total} |",
         f"| Passed on first attempt | {first_pass_str} |",
         f"| Fix attempts | {metrics.fix_attempts} |",
         f"| Coverage | {cov_str} |",
@@ -73,5 +82,14 @@ def render_comment(
         if metrics.stop_reason == "error":
             err_msg = final_message or getattr(metrics, "final_message", "")
             lines.append(f"Error: {err_msg}")
+
+    uncov = (
+        uncovered_functions
+        if uncovered_functions is not None
+        else getattr(metrics, "uncovered_functions", [])
+    )
+    if uncov:
+        lines.append("")
+        lines.append(f"Not covered: {', '.join(uncov)}")
 
     return "\n".join(lines) + "\n"

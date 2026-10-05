@@ -2,7 +2,7 @@
 
 import ast
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,10 @@ class RunMetrics:
     duration_s: float
     stop_reason: str
     final_message: str = ""
+    functions_total: int = 0
+    functions_referenced: int = 0
+    test_cases: int | None = None
+    uncovered_functions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert metrics to dictionary."""
@@ -108,6 +112,7 @@ def compute_metrics(
         final_passed = last_run.passed
         final_failed = last_run.failed + last_run.errors
         fix_attempts = max(0, len(result.pytest_runs) - 1)
+        test_cases = final_passed + final_failed
     else:
         first_run_total = 0
         first_run_passed = 0
@@ -115,6 +120,7 @@ def compute_metrics(
         final_passed = 0
         final_failed = 0
         fix_attempts = 0
+        test_cases = None
 
     cov_before_pct = _get_coverage_pct(coverage_before)
     cov_after_pct = _get_coverage_pct(coverage_after)
@@ -149,4 +155,8 @@ def compute_metrics(
         duration_s=duration_s,
         stop_reason=result.stop_reason,
         final_message=result.final_message,
+        functions_total=getattr(result, "functions_total", 0),
+        functions_referenced=getattr(result, "functions_referenced", 0),
+        test_cases=test_cases,
+        uncovered_functions=list(getattr(result, "uncovered_functions", [])),
     )

@@ -164,6 +164,7 @@ def main(
             result.written_tests,
             model=model,
             final_message=result.final_message,
+            uncovered_functions=result.uncovered_functions,
         )
         print(comment)
 
@@ -180,6 +181,7 @@ def main(
                 "written_tests": result.written_tests,
                 "stop_reason": result.stop_reason,
                 "steps": result.steps,
+                "uncovered_functions": result.uncovered_functions,
             }
             json_path.write_text(json.dumps(out_data, indent=2), encoding="utf-8")
 

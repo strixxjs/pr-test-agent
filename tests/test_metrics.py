@@ -209,3 +209,44 @@ def test_read_price_config_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     p_in, p_out = read_price_config_from_env()
     assert p_in == 0.59
     assert p_out == 0.79
+
+
+def test_metrics_functions_and_test_cases(tmp_path: Path) -> None:
+    run1 = PytestResult(
+        exit_code=0,
+        passed=5,
+        failed=1,
+        errors=0,
+        skipped=0,
+        duration_s=1.0,
+        output="5 passed, 1 failed",
+        timed_out=False,
+    )
+    agent_result = AgentResult(
+        stop_reason="done",
+        steps=2,
+        total_tokens=200,
+        prompt_tokens=120,
+        completion_tokens=80,
+        pytest_runs=[run1],
+        uncovered_functions=["src/mod.py:foo"],
+        functions_total=4,
+        functions_referenced=3,
+    )
+
+    metrics = compute_metrics(
+        repo_root=tmp_path,
+        result=agent_result,
+        coverage_before=None,
+        coverage_after=None,
+        prompt_tokens=120,
+        completion_tokens=80,
+        duration_s=1.0,
+        price_in_per_mtok=None,
+        price_out_per_mtok=None,
+    )
+
+    assert metrics.test_cases == 6
+    assert metrics.functions_total == 4
+    assert metrics.functions_referenced == 3
+    assert metrics.uncovered_functions == ["src/mod.py:foo"]

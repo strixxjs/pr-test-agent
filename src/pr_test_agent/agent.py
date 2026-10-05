@@ -112,6 +112,8 @@ class AgentResult:
     stop_reason: str
     steps: int
     total_tokens: int
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     pytest_runs: list[PytestResult] = field(default_factory=list)
     written_tests: list[str] = field(default_factory=list)
     final_message: str = ""
@@ -141,6 +143,8 @@ def run_agent(
             stop_reason="done",
             steps=0,
             total_tokens=0,
+            prompt_tokens=0,
+            completion_tokens=0,
             pytest_runs=[],
             written_tests=[],
             final_message="No changed functions found in diff.",
@@ -170,6 +174,8 @@ def run_agent(
 
     steps = 0
     total_tokens = 0
+    prompt_tokens = 0
+    completion_tokens = 0
     pytest_runs: list[PytestResult] = []
     written_tests: list[str] = []
     final_message = ""
@@ -194,6 +200,8 @@ def run_agent(
             break
 
         steps += 1
+        prompt_tokens += reply.prompt_tokens
+        completion_tokens += reply.completion_tokens
         call_tokens = reply.prompt_tokens + reply.completion_tokens
         total_tokens += call_tokens
 
@@ -326,6 +334,8 @@ def run_agent(
         stop_reason=stop_reason,
         steps=steps,
         total_tokens=total_tokens,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
         pytest_runs=pytest_runs,
         written_tests=written_tests,
         final_message=final_message,

@@ -9,6 +9,7 @@ from pr_test_agent.tools import (
     read_diff,
     read_file,
     run_pytest,
+    safe_env,
     write_test,
 )
 
@@ -120,3 +121,33 @@ def test_get_coverage_clean_repo(git_repo: Path) -> None:
         check=True,
     ).stdout.strip()
     assert status_after == ""
+
+
+def test_safe_env_in_run_pytest_and_get_coverage(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test_secret_key_12345")
+    monkeypatch.setenv("MY_SECRET_TOKEN", "super_secret_token_abc")
+
+    # Direct safe_env check
+    env = safe_env()
+    assert "GROQ_API_KEY" not in env
+    assert "MY_SECRET_TOKEN" not in env
+    assert "PATH" in env
+
+    test_content = (
+        "import os\n\n"
+        "def test_secrets_stripped() -> None:\n"
+        "    assert 'GROQ_API_KEY' not in os.environ\n"
+        "    assert 'MY_SECRET_TOKEN' not in os.environ\n"
+        "    assert 'PATH' in os.environ\n"
+    )
+    write_test(git_repo, "tests/test_env_sanitized.py", test_content)
+
+    res = run_pytest(git_repo, targets=["tests/test_env_sanitized.py"])
+    assert res.passed == 1
+    assert res.failed == 0
+    assert res.exit_code == 0
+
+    cov_res = get_coverage(git_repo, files=["src/math_ops.py"])
+    assert cov_res.exit_code == 0

@@ -288,6 +288,21 @@ def _parse_junit_xml(xml_path: Path) -> tuple[int, int, int, int, float]:
     return (passed, failures, errors, skipped, duration)
 
 
+def safe_env() -> dict[str, str]:
+    """Return a copy of os.environ stripped of sensitive keys, tokens, and secrets."""
+    stripped: dict[str, str] = {}
+    sensitive_substrings = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+    sensitive_prefixes = ("GH_", "GITHUB_TOKEN", "ACTIONS_")
+    for k, v in os.environ.items():
+        k_upper = k.upper()
+        if any(sub in k_upper for sub in sensitive_substrings):
+            continue
+        if any(k_upper.startswith(pre) for pre in sensitive_prefixes):
+            continue
+        stripped[k] = v
+    return stripped
+
+
 def run_pytest(
     repo_root: Path,
     targets: list[str] | None = None,
@@ -315,7 +330,7 @@ def run_pytest(
         stderr = ""
         exit_code = 0
 
-        env = dict(os.environ)
+        env = safe_env()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
 
         try:
@@ -383,7 +398,7 @@ def get_coverage(
     with tempfile.TemporaryDirectory() as tmp_dir:
         cov_json = Path(tmp_dir) / "coverage.json"
         cov_file = Path(tmp_dir) / ".coverage"
-        env = dict(os.environ)
+        env = safe_env()
         env["COVERAGE_FILE"] = str(cov_file)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
 

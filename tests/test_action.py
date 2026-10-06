@@ -50,6 +50,21 @@ def test_action_yml_structure() -> None:
     assert any("setup-python" in u for u in step_uses)
     assert any("upload-artifact" in u for u in step_uses)
 
+    # Verify no run block contains ${{ inputs.
+    for step in steps:
+        if "run" in step:
+            assert "${{ inputs." not in step["run"], (
+                f"step {step.get('name')} contains '${{{{ inputs.' in run block"
+            )
+
+        step_env = step.get("env", {})
+        if step.get("name") == "Run pr-test-agent":
+            assert step_env.get("GROQ_API_KEY") == "${{ inputs.groq-api-key }}"
+        else:
+            assert "GROQ_API_KEY" not in step_env
+            for val in step_env.values():
+                assert "inputs.groq-api-key" not in str(val)
+
 
 def test_example_pr_test_agent_workflow() -> None:
     raw_text = (Path(__file__).resolve().parent.parent / "examples/pr-test-agent.yml").read_text(

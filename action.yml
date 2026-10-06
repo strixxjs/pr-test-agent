@@ -19,7 +19,6 @@ inputs:
   base-ref:
     description: 'Base git reference to compare against'
     required: false
-    default: ${{ github.base_ref }}
   max-steps:
     description: 'Maximum agent steps'
     required: false
@@ -43,63 +42,71 @@ runs:
 
     - name: Set up target repository environment
       shell: bash
+      env:
+        INPUT_INSTALL_COMMAND: ${{ inputs.install-command }}
       run: |
-        python -m venv "${{ runner.temp }}/target_venv"
-        "${{ runner.temp }}/target_venv/bin/pip" install --upgrade pip
-        "${{ runner.temp }}/target_venv/bin/pip" install pytest pytest-asyncio pytest-cov
-        if [ -n "${{ inputs.install-command }}" ]; then
+        python -m venv "${RUNNER_TEMP}/target_venv"
+        "${RUNNER_TEMP}/target_venv/bin/pip" install --upgrade pip
+        "${RUNNER_TEMP}/target_venv/bin/pip" install pytest pytest-asyncio pytest-cov
+        if [ -n "$INPUT_INSTALL_COMMAND" ]; then
           cd "$GITHUB_WORKSPACE"
-          PATH="${{ runner.temp }}/target_venv/bin:$PATH"
-          VIRTUAL_ENV="${{ runner.temp }}/target_venv"
-          eval "${{ inputs.install-command }}"
+          PATH="${RUNNER_TEMP}/target_venv/bin:$PATH"
+          VIRTUAL_ENV="${RUNNER_TEMP}/target_venv"
+          bash -c "$INPUT_INSTALL_COMMAND"
         fi
 
     - name: Set up pr-test-agent environment
       shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
       run: |
-        python -m venv "${{ runner.temp }}/agent_venv"
-        "${{ runner.temp }}/agent_venv/bin/pip" install --upgrade pip
-        "${{ runner.temp }}/agent_venv/bin/pip" install "${{ github.action_path }}"
+        python -m venv "${RUNNER_TEMP}/agent_venv"
+        "${RUNNER_TEMP}/agent_venv/bin/pip" install --upgrade pip
+        "${RUNNER_TEMP}/agent_venv/bin/pip" install "$ACTION_PATH"
 
     - name: Run pr-test-agent
       shell: bash
       env:
         GROQ_API_KEY: ${{ inputs.groq-api-key }}
         GROQ_MODEL: ${{ inputs.model }}
+        INPUT_BASE_REF: ${{ inputs.base-ref }}
+        INPUT_MAX_STEPS: ${{ inputs.max-steps }}
+        INPUT_MAX_TOKENS: ${{ inputs.max-tokens }}
+        INPUT_MAX_FIX_ATTEMPTS: ${{ inputs.max-fix-attempts }}
       run: |
-        mkdir -p "${{ runner.temp }}/pr-test-agent-output/logs"
-        JSON_OUT="${{ runner.temp }}/pr-test-agent-output/results.json"
-        COMMENT_OUT="${{ runner.temp }}/pr-test-agent-output/comment.md"
-        LOG_DIR="${{ runner.temp }}/pr-test-agent-output/logs"
+        mkdir -p "${RUNNER_TEMP}/pr-test-agent-output/logs"
+        JSON_OUT="${RUNNER_TEMP}/pr-test-agent-output/results.json"
+        COMMENT_OUT="${RUNNER_TEMP}/pr-test-agent-output/comment.md"
+        LOG_DIR="${RUNNER_TEMP}/pr-test-agent-output/logs"
 
-        BASE_REF="${{ inputs.base-ref }}"
+        BASE_REF="${INPUT_BASE_REF:-$GITHUB_BASE_REF}"
         if [[ ! "$BASE_REF" =~ ^origin/ ]]; then
           BASE_REF="origin/$BASE_REF"
         fi
 
         EXTRA_ARGS=()
-        if [ -n "${{ inputs.max-steps }}" ]; then
-          EXTRA_ARGS+=(--max-steps "${{ inputs.max-steps }}")
+        if [ -n "$INPUT_MAX_STEPS" ]; then
+          EXTRA_ARGS+=(--max-steps "$INPUT_MAX_STEPS")
         fi
-        if [ -n "${{ inputs.max-tokens }}" ]; then
-          EXTRA_ARGS+=(--max-tokens "${{ inputs.max-tokens }}")
+        if [ -n "$INPUT_MAX_TOKENS" ]; then
+          EXTRA_ARGS+=(--max-tokens "$INPUT_MAX_TOKENS")
         fi
-        if [ -n "${{ inputs.max-fix-attempts }}" ]; then
-          EXTRA_ARGS+=(--max-fix-attempts "${{ inputs.max-fix-attempts }}")
+        if [ -n "$INPUT_MAX_FIX_ATTEMPTS" ]; then
+          EXTRA_ARGS+=(--max-fix-attempts "$INPUT_MAX_FIX_ATTEMPTS")
         fi
 
         set +e
-        "${{ runner.temp }}/agent_venv/bin/pr-test-agent" run \
+        "${RUNNER_TEMP}/agent_venv/bin/pr-test-agent" run \
           --repo "$GITHUB_WORKSPACE" \
           --base "$BASE_REF" \
-          --python "${{ runner.temp }}/target_venv/bin/python" \
+          --python "${RUNNER_TEMP}/target_venv/bin/python" \
           --log-dir "$LOG_DIR" \
           --json-out "$JSON_OUT" \
           --comment-out "$COMMENT_OUT" \
           "${EXTRA_ARGS[@]}"
         CLI_EXIT=$?
         set -e
-        echo "$CLI_EXIT" > "${{ runner.temp }}/pr-test-agent-output/exit_code"
+        echo "$CLI_EXIT" > "${RUNNER_TEMP}/pr-test-agent-output/exit_code"
 
     - name: Post or update PR comment
       if: always()
@@ -107,9 +114,10 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
       run: |
-        COMMENT_OUT="${{ runner.temp }}/pr-test-agent-output/comment.md"
-        JSON_OUT="${{ runner.temp }}/pr-test-agent-output/results.json"
+        COMMENT_OUT="${RUNNER_TEMP}/pr-test-agent-output/comment.md"
+        JSON_OUT="${RUNNER_TEMP}/pr-test-agent-output/results.json"
 
         if [ -z "$PR_NUMBER" ]; then
           echo "No pull request number found, skipping comment."
@@ -120,17 +128,17 @@ runs:
           echo -e "<!-- pr-test-agent -->\n### PR Test Agent\n\nAgent encountered a fatal error before generating a comment. Please check workflow run logs." > "$COMMENT_OUT"
         fi
 
-        COMMENT_ID=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" --paginate --jq '.[] | select(.body | contains("<!-- pr-test-agent -->")) | .id' | head -n 1)
+        COMMENT_ID=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --paginate --jq '.[] | select(.body | contains("<!-- pr-test-agent -->")) | .id' | head -n 1)
 
         if [ -n "$COMMENT_ID" ]; then
-          gh api -X PATCH "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" -F body=@"$COMMENT_OUT"
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}" -F body=@"$COMMENT_OUT"
         else
-          gh api -X POST "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" -F body=@"$COMMENT_OUT"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -F body=@"$COMMENT_OUT"
         fi
 
         CLI_EXIT=0
-        if [ -f "${{ runner.temp }}/pr-test-agent-output/exit_code" ]; then
-          CLI_EXIT=$(cat "${{ runner.temp }}/pr-test-agent-output/exit_code")
+        if [ -f "${RUNNER_TEMP}/pr-test-agent-output/exit_code" ]; then
+          CLI_EXIT=$(cat "${RUNNER_TEMP}/pr-test-agent-output/exit_code")
         fi
 
         IS_CRASH=1

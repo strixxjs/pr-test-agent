@@ -53,14 +53,16 @@ jobs:
 
 ## Results
 
-| Target repo | Model | Changed functions with tests | Passed on first attempt | Fix attempts | Coverage before -> after | Tokens | Duration | Outcome |
+| Target repo | Model | Changed functions with tests | Passed on first attempt | Fix attempts | Coverage before → after | Tokens | Duration | Outcome |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | RAG service (FastAPI + Qdrant) | `qwen/qwen3.8-27b` | 3/3 | 8/9 (88.9%) | 1 | 0.0% -> 74.6% | 19,110 | 96.0s | done |
+| RAG service (FastAPI + Qdrant), run in GitHub Actions on a live PR | `qwen/qwen3.8-27b` | 3/3 | 7/11 (63.6%) | 1 | 0.0% -> 76.1% | 21,052 | 119.9s | done |
 | RAG service (FastAPI + Qdrant) | `openai/gpt-oss-120b` | 3/3 | 0/1 (0.0%) | 0 | 0.0% -> 0.0% | 15,537 | 183.0s | error |
 
 Notes:
 - The target repo had no tests before, so "0% -> X%" is a starting point, not an improvement over existing tests.
-- One run per model, not statistics.
+- Two qwen runs on the same repo (local and in CI) gave 88.9% and 63.6% first-attempt pass rates, so results vary run to run; this is not a statistically meaningful benchmark.
+- Changed functions with tests counts functions referenced by name in generated test files; in the gpt-oss-120b run the generated tests did not execute.
 - The `openai/gpt-oss-120b` run stopped with an error because Groq rejected a tool call with invalid JSON (`tool_use_failed`) after 3 retries.
 - Estimated cost is n/a because the free tier was used.
 
@@ -78,9 +80,14 @@ Notes:
 | Stop reason | done |
 | Model | qwen/qwen3.8-27b |
 
+## Verified on a live pull request
+
+The Action ran on a live PR in GitHub Actions (job succeeded in about 2m41s) and the agent posted the comment below; the demo PR was closed without merging and the agent committed nothing to the PR branch.
+
+![PR comment posted on live pull request](docs/live-pr-comment.png)
+
 ## Known limitations
 
-- **Live PR verification**: The GitHub Action has not yet been verified on a live pull request.
 - **Free-tier rate limits**: Groq free-tier accounts are subject to requests-per-minute (RPM) and tokens-per-minute (TPM) limits that may be reached on larger PR diffs.
 - **Tool-call JSON parsing**: Smaller models may occasionally produce invalid tool-call JSON arguments; transient tool call failures are retried automatically, but retries are limited.
 - **Fix limits**: Test repair attempts are bounded (default: 3) to prevent wasting tokens on tests that require deep architectural changes or external mocks.

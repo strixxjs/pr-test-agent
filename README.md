@@ -2,7 +2,7 @@
 
 An autonomous agent that analyzes code changes in pull requests and writes pytest unit tests to verify changed behavior and ensure test coverage.
 
-Status: work in progress
+See [GUIDELINES.md](GUIDELINES.md) for practical agent design guidelines, sandboxing rules, cost controls, and lessons learned.
 
 ## Quick start (2 minutes)
 
@@ -44,14 +44,43 @@ jobs:
 
 ## Safety
 
-- **Writes only to `tests/`**: The agent is restricted to writing test files in `tests/test_*.py`. It cannot modify application source code.
-- **Nothing is committed or pushed**: The agent executes purely within the ephemeral runner workspace. It never commits, pushes, or alters the pull request branch.
-- **Iteration, token, and fix limits**: Strict limits (`max-steps`, `max-tokens`, `max-fix-attempts`) prevent runaway execution, high token usage, and endless test fix loops.
-- **No fork secrets**: The example workflow triggers strictly on `pull_request` (never `pull_request_target`) and enforces a fork guard (`if: github.event.pull_request.head.repo.full_name == github.repository`) so repository secrets are not exposed to external forks.
+- **Writes only to `tests/`**: Restricted to writing test files matching `tests/test_*.py`. Cannot modify application source code.
+- **Nothing is committed or pushed**: Executes inside the ephemeral runner workspace; never commits or pushes to the repository branch.
+- **Iteration, token, and fix limits**: Strict limits (`max-steps`, `max-tokens`, `max-fix-attempts`) prevent runaway execution and unbounded token consumption.
+- **Fork security**: Triggers strictly on `pull_request` (never `pull_request_target`) with fork guards so repository secrets are not exposed to untrusted PRs.
 - **Minimal permissions**: Requests only `contents: read` and `pull-requests: write`.
+- **Sanitized test execution**: Strips sensitive environment variables (API keys, tokens, credentials) before running generated tests or measuring coverage.
+
+## Results
+
+| Target repo | Model | Changed functions with tests | Passed on first attempt | Fix attempts | Coverage before -> after | Tokens | Duration | Outcome |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| RAG service (FastAPI + Qdrant) | `qwen/qwen3.8-27b` | 3/3 | 8/9 (88.9%) | 1 | 0.0% -> 74.6% | 19,110 | 96.0s | done |
+| RAG service (FastAPI + Qdrant) | `openai/gpt-oss-120b` | 3/3 | 0/1 (0.0%) | 0 | 0.0% -> 0.0% | 15,537 | 183.0s | error |
+
+Notes:
+- The target repo had no tests before, so "0% -> X%" is a starting point, not an improvement over existing tests.
+- One run per model, not statistics.
+- The `openai/gpt-oss-120b` run stopped with an error because Groq rejected a tool call with invalid JSON (`tool_use_failed`) after 3 retries.
+- Estimated cost is n/a because the free tier was used.
+
+## Example PR comment
+
+| Metric | Value |
+| --- | --- |
+| Tests added | 9 functions / 9 cases |
+| Changed functions with tests | 3/3 |
+| Passed on first attempt | 8/9 (88.9%) |
+| Fix attempts | 1 |
+| Coverage | 0.0% -> 74.6% (+74.6%) |
+| Tokens | 19,110 (17,891 prompt + 1,219 completion) |
+| Duration | 96.0s |
+| Stop reason | done |
+| Model | qwen/qwen3.8-27b |
 
 ## Known limitations
 
+- **Live PR verification**: The GitHub Action has not yet been verified on a live pull request.
 - **Free-tier rate limits**: Groq free-tier accounts are subject to requests-per-minute (RPM) and tokens-per-minute (TPM) limits that may be reached on larger PR diffs.
 - **Tool-call JSON parsing**: Smaller models may occasionally produce invalid tool-call JSON arguments; transient tool call failures are retried automatically, but retries are limited.
 - **Fix limits**: Test repair attempts are bounded (default: 3) to prevent wasting tokens on tests that require deep architectural changes or external mocks.
@@ -117,3 +146,7 @@ pr-test-agent run \
 - `--max-steps INT`: Maximum agent loop iterations (default: `12`).
 - `--max-tokens INT`: Maximum token budget across prompt and completion (default: `60000`).
 - `--max-fix-attempts INT`: Maximum test rewrite attempts after failures (default: `3`).
+
+## Guidelines
+
+See [GUIDELINES.md](GUIDELINES.md) for practical guidelines on writing agent rules, sandboxing write access, limiting token costs, quality evaluation, and real-world failure modes.
